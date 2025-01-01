@@ -1,0 +1,21 @@
+# Name of the experiment (and the new docker image that MLFlow will create when running the file)
+name: hate_speech_detection
+
+docker_env:
+  # Name of the image we'll be running a container from
+  image: jedha/tensorflow-simple-image
+  # Volume binding
+  volumes: ["$(pwd):/home/app"]
+  # Set environment variables
+  environment: [
+      "MLFLOW_TRACKING_URI", 
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "BACKEND_STORE_URI",
+      "ARTIFACT_ROOT"
+    ]
+    
+entry_points:
+  main:
+    # Command that will be run when running that file 
+    command: "python train.py" 
