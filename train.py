@@ -18,6 +18,9 @@ from spacy.lang.en.stop_words import STOP_WORDS
 
 from tensorflow.keras.layers import Embedding, SimpleRNN, Dense, GRU, LSTM, GlobalMaxPooling1D, Dropout
 
+from tensorflow.keras.layers import TextVectorization
+
+
 from sklearn.model_selection import train_test_split
 
 
@@ -49,21 +52,16 @@ def preprocess_dataframe(df):
     return df 
 
 
-def tokenize_dataframe(df, max_length=100):
-    tokenizer = tf.keras.preprocessing.text.Tokenizer() # instanciate the tokenizer
-    tokenizer.fit_on_texts(df["text_clean"])
-    df["text_encoded"] = tokenizer.texts_to_sequences(df.text_clean)
-    df["len_review"] = df["text_encoded"].apply(lambda x: len(x))
-    df = df[df["len_review"]!=0]
-
-    text_pad = tf.keras.preprocessing.sequence.pad_sequences(df.text_encoded, padding="post",maxlen=max_length)
-    full_ds = tf.data.Dataset.from_tensor_slices((text_pad, df.target))
-
-    return tokenizer, text_pad, full_ds
-
-def build_model(tokenizer,input_shape_length=100,embedding_dim=32):
-    vocab_size = len(tokenizer.word_index)
+def build_model(input_shape_length=100,embedding_dim=32,vocab_size=20000):
+        
+    vectorizer = TextVectorization(
+        max_tokens=vocab_size, 
+        output_mode='int',
+        output_sequence_length=input_shape_length
+    )
+    
     model = tf.keras.Sequential([
+                    vectorizer,
                     Embedding(vocab_size+1, embedding_dim, input_shape=[input_shape_length,],name="embedding"),
                     GRU(units=64, return_sequences=True), # returns the last output
                     GlobalMaxPooling1D(),
@@ -80,13 +78,19 @@ def build_model(tokenizer,input_shape_length=100,embedding_dim=32):
         loss='binary_crossentropy',  # Loss for binary classification
         metrics=['accuracy']
     )
-    return model
+    return model, vectorizer
 
 
+#------------------ Let's here write the flow of the MLFlow run------------------
 
 if __name__ == "__main__":
 
-    mlflow.tensorflow.autolog()
+    # Set MLflow experiment name
+    experiment_name = "hate_speech_detection"
+    mlflow.set_experiment(experiment_name)
+
+    mlflow.tensorflow.autolog()  # Enable automatic logging for TensorFlow
+
 
     with mlflow.start_run():
 
@@ -98,40 +102,56 @@ if __name__ == "__main__":
         print("dataframe read...")
 
         print("cleaning dataframe...")
-        df = clean_dataframe(df)
+        df_clean = clean_dataframe(df)
         print("dataframe cleaned...")        
 
         print("preprocessing dataframe...")
-        df = preprocess_dataframe(df)
+        df_preprocessed = preprocess_dataframe(df_clean)
         print("dataframe preprocessed...")  
 
         input_shape_length = 100
 
-        print("tokenizing dataframe...")
-        tokenizer, text_pad, full_ds = tokenize_dataframe(df,input_shape_length)
-        print('tokenizing ok...')
-
-        embedding_dim = 32
-        print("building model...")
-        model = build_model(tokenizer,input_shape_length,embedding_dim)
-
-        xtrain, xval, ytrain, yval = train_test_split(text_pad,df.target, test_size=0.2)
+        print("splitting the data...")
+        xtrain, xval, ytrain, yval = train_test_split(df_preprocessed["text_clean"], df_preprocessed.target, test_size=0.2)
 
         train = tf.data.Dataset.from_tensor_slices((xtrain, ytrain))
         val = tf.data.Dataset.from_tensor_slices((xval, yval))
         train_batch = train.shuffle(len(train)).batch(64)
         val_batch = val.shuffle(len(val)).batch(64)
+        print("data split..")        
+
+        embedding_dim = 32
+        print("building model...")
+        model,vectorizer = build_model(input_shape_length,embedding_dim)
+
+        # Adapt the vectorizer to the training data
+        print("adapting vectorizer...")
+        vectorizer.adapt(train.map(lambda x, y: x))
+
+        # Log parameters
+        mlflow.log_param("embedding_dim", embedding_dim)
+        mlflow.log_param("input_shape_length", input_shape_length)
+        mlflow.log_param("batch_size", 64)
 
 
         print("training model...")
-        model.fit(train_batch, epochs = 3, validation_data=val_batch)
+        history = model.fit(train_batch, epochs = 3, validation_data=val_batch)
+
+        # Log metrics for each epoch
+        for epoch in range(len(history.history['loss'])):
+            for metric_name in history.history.keys():
+                mlflow.log_metric(metric_name, history.history[metric_name][epoch], step=epoch)
+
+        # Infer and log the model signature
+        input_sample = next(iter(train_batch.take(1)))[0]  # Get a sample batch of input
+        predicted_sample = model.predict(input_sample)
+        signature = infer_signature(input_sample.numpy(), predicted_sample)
+        mlflow.tensorflow.log_model(model, artifact_path="model", signature=signature)
+
+
 
         print("...Done!")
         print(f"---Total training time: {time.time()-start_time}")
-
-
-
-
 
 
 
