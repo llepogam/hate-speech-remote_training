@@ -1,35 +1,24 @@
 import argparse
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
 import time
+
 import mlflow
 from mlflow.models.signature import infer_signature
+
 from sklearn.model_selection import train_test_split 
-from sklearn.preprocessing import  StandardScaler
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.pipeline import Pipeline
-
-import pandas as pd
-import numpy as np
-import tensorflow as tf
-
-import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-import io
-
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import precision_score, recall_score, f1_score
 
+import tensorflow as tf
+from tensorflow.keras.layers import Embedding, SimpleRNN, Dense, GRU, LSTM, GlobalMaxPooling1D, Dropout, Input
+from tensorflow.keras.layers import TextVectorization
 
 import spacy
 from spacy.lang.en.stop_words import STOP_WORDS
-
-from tensorflow.keras.layers import Embedding, SimpleRNN, Dense, GRU, LSTM, GlobalMaxPooling1D, Dropout, Input
-
-from tensorflow.keras.layers import TextVectorization
-
-
-from sklearn.model_selection import train_test_split
 
 
 #------------------ Let's build the function that will be used in the training------------------
@@ -46,7 +35,6 @@ def clean_dataframe(df):
     df_simplified.loc[df_simplified['subtask_a'] == 'OFF', 'target'] = 1
     df_simplified = df_simplified.drop(columns=['subtask_a'])
     return df_simplified
-
 
 def preprocess_dataframe(df):
     nlp = spacy.load("en_core_web_sm")
@@ -65,15 +53,9 @@ def save_preprocessed_data(df):
 
 def get_preprocessed_data():
 
-    # Read the DataFrame from the CSV file
-    df = pd.read_csv("preprocessed.csv")
-    
-    # Ensure text data is in string format
-    df["text_clean"] = df["text_clean"].astype(str)
-    
-    # Optionally, ensure target labels are numeric
+    df = pd.read_csv("preprocessed.csv")    
+    df["text_clean"] = df["text_clean"].astype(str)   
     df["target"] = pd.to_numeric(df["target"], errors='coerce')
-
     return df
 
 
@@ -88,20 +70,18 @@ def build_model(input_shape_length=100,embedding_dim=32,vocab_size=20000):
     model = tf.keras.Sequential([
                     vectorizer,
                     Embedding(vocab_size+1, embedding_dim, input_shape=[input_shape_length,],name="embedding"),
-                    GRU(units=64, return_sequences=True), # returns the last output
+                    GRU(units=128, return_sequences=True),
+                    GRU(units=128, return_sequences=True),
                     GlobalMaxPooling1D(),
                     Dropout(0.2),
                     Dense(16, activation='relu'),
-                    Dense(8, activation='relu'),
-                    Dense(4, activation='relu'),
                     Dense(1, activation="sigmoid")
     ]) 
 
 
-    # Compile the model
     model.compile(
         optimizer='adam',
-        loss='binary_crossentropy',  # Loss for binary classification
+        loss='binary_crossentropy',  
         metrics=['accuracy']
     )
     return model, vectorizer
@@ -111,16 +91,14 @@ def build_model(input_shape_length=100,embedding_dim=32,vocab_size=20000):
 
 if __name__ == "__main__":
 
-    # Set MLflow experiment name
     experiment_name = "hate_speech_detection"
     mlflow.set_experiment(experiment_name)
 
-    mlflow.tensorflow.autolog()  # Enable automatic logging for TensorFlow
+    mlflow.tensorflow.autolog()  
 
 
     with mlflow.start_run():
 
-        # Time execution
         start_time = time.time()
 
         print("reading dataframe...")
@@ -137,7 +115,9 @@ if __name__ == "__main__":
         df_preprocessed = get_preprocessed_data()
         print("dataframe preprocessed...")  
 
+        #Parameters
         input_shape_length = 100
+        embedding_dim = 32
 
         print("splitting the data...")
         xtrain, xval, ytrain, yval = train_test_split(df_preprocessed["text_clean"], df_preprocessed["target"], test_size=0.2)
@@ -148,7 +128,7 @@ if __name__ == "__main__":
         val_batch = val.shuffle(len(val)).batch(64)
         print("data split..")        
 
-        embedding_dim = 32
+
         print("building model...")
         model,vectorizer = build_model(input_shape_length,embedding_dim)
 
@@ -165,12 +145,12 @@ if __name__ == "__main__":
                 mlflow.log_metric(metric_name, history.history[metric_name][epoch], step=epoch)
 
         # Infer and log the model signature
-        input_sample = next(iter(train_batch.take(1)))[0]  # Get a sample batch of input
+        input_sample = next(iter(train_batch.take(1)))[0]
         predicted_sample = model.predict(input_sample)
         signature = infer_signature(input_sample.numpy(), predicted_sample)
         mlflow.tensorflow.log_model(model, artifact_path="hate_speech_detection", signature=signature)
  
-        print(type(xval))  # Ensure it is a NumPy array or TensorFlow tensor
+        #Make predictions
         y_pred_probs = model.predict(xval.to_numpy())
         y_pred = (y_pred_probs > 0.5).astype(int) 
 
@@ -184,12 +164,10 @@ if __name__ == "__main__":
 
         mlflow.log_artifact('confusion_matrix.png')
 
-        accuracy2 = accuracy_score(yval, y_pred)
         precision = precision_score(yval, y_pred)
         recall = recall_score(yval, y_pred)
         f1 = f1_score(yval, y_pred)
 
-        mlflow.log_param("accuracy2", accuracy2)
         mlflow.log_param("precision", precision)
         mlflow.log_param("recall", recall)
         mlflow.log_param("f1", f1)
