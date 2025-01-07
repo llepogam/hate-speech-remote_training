@@ -77,22 +77,16 @@ def get_preprocessed_data():
     return df
 
 
-def tokenize_dataframe(df, max_length=100):
-    tokenizer = tf.keras.preprocessing.text.Tokenizer() # instanciate the tokenizer
-    tokenizer.fit_on_texts(df["text_clean"])
-    df["text_encoded"] = tokenizer.texts_to_sequences(df.text_clean)
-    df["len_review"] = df["text_encoded"].apply(lambda x: len(x))
-    df = df[df["len_review"]!=0]
-
-    text_pad = tf.keras.preprocessing.sequence.pad_sequences(df.text_encoded, padding="post",maxlen=max_length)
-    full_ds = tf.data.Dataset.from_tensor_slices((text_pad, df.target))
-
-    return tokenizer, text_pad, full_ds, df
-
-
-def build_model(tokenizer,input_shape_length=100,embedding_dim=32):
-    vocab_size = len(tokenizer.word_index)
+def build_model(input_shape_length=100,embedding_dim=32,vocab_size=20000):
+        
+    vectorizer = TextVectorization(
+        max_tokens=vocab_size, 
+        output_mode='int',
+        output_sequence_length=input_shape_length
+    )
+    
     model = tf.keras.Sequential([
+                    vectorizer,
                     Embedding(vocab_size+1, embedding_dim, input_shape=[input_shape_length,],name="embedding"),
                     GRU(units=64, return_sequences=True), # returns the last output
                     GlobalMaxPooling1D(),
@@ -101,7 +95,8 @@ def build_model(tokenizer,input_shape_length=100,embedding_dim=32):
                     Dense(8, activation='relu'),
                     Dense(4, activation='relu'),
                     Dense(1, activation="sigmoid")
-    ])
+    ]) 
+
 
     # Compile the model
     model.compile(
@@ -109,10 +104,7 @@ def build_model(tokenizer,input_shape_length=100,embedding_dim=32):
         loss='binary_crossentropy',  # Loss for binary classification
         metrics=['accuracy']
     )
-    return model
-
-
-
+    return model, vectorizer
 
 
 #------------------ Let's here write the flow of the MLFlow run------------------
@@ -145,15 +137,10 @@ if __name__ == "__main__":
         df_preprocessed = get_preprocessed_data()
         print("dataframe preprocessed...")  
 
-
         input_shape_length = 100
 
-        print("tokenizing dataframe...")
-        tokenizer, text_pad, full_ds, df_tokenized = tokenize_dataframe(df_preprocessed,input_shape_length)
-        print('tokenizing ok...')        
-
         print("splitting the data...")
-        xtrain, xval, ytrain, yval = train_test_split(text_pad,df_tokenized.target, test_size=0.2)
+        xtrain, xval, ytrain, yval = train_test_split(df_preprocessed["text_clean"], df_preprocessed["target"], test_size=0.2)
 
         train = tf.data.Dataset.from_tensor_slices((xtrain, ytrain))
         val = tf.data.Dataset.from_tensor_slices((xval, yval))
@@ -163,8 +150,11 @@ if __name__ == "__main__":
 
         embedding_dim = 32
         print("building model...")
-        model = build_model(tokenizer,input_shape_length,embedding_dim)
+        model,vectorizer = build_model(input_shape_length,embedding_dim)
 
+        # Adapt the vectorizer to the training data
+        print("adapting vectorizer...")
+        vectorizer.adapt(train.map(lambda x, y: x))
 
         print("training model...")
         history = model.fit(train_batch, epochs = 3, validation_data=val_batch)
@@ -180,8 +170,8 @@ if __name__ == "__main__":
         signature = infer_signature(input_sample.numpy(), predicted_sample)
         mlflow.tensorflow.log_model(model, artifact_path="hate_speech_detection", signature=signature)
  
-
-        y_pred_probs = model.predict(xval)
+        print(type(xval))  # Ensure it is a NumPy array or TensorFlow tensor
+        y_pred_probs = model.predict(xval.to_numpy())
         y_pred = (y_pred_probs > 0.5).astype(int) 
 
         # Compute the confusion matrix
@@ -194,12 +184,12 @@ if __name__ == "__main__":
 
         mlflow.log_artifact('confusion_matrix.png')
 
-        accuracy_cm = accuracy_score(yval, y_pred)
+        accuracy2 = accuracy_score(yval, y_pred)
         precision = precision_score(yval, y_pred)
         recall = recall_score(yval, y_pred)
         f1 = f1_score(yval, y_pred)
 
-        mlflow.log_param("accuracy_cm", accuracy_cm)
+        mlflow.log_param("accuracy2", accuracy2)
         mlflow.log_param("precision", precision)
         mlflow.log_param("recall", recall)
         mlflow.log_param("f1", f1)
