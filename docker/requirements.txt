@@ -1,0 +1,16 @@
+boto3
+pandas 
+gunicorn 
+streamlit 
+scikit-learn  
+matplotlib 
+seaborn 
+plotly
+mlflow
+psycopg2-binary
+jupyter
+spacy
+tensorflow
+numpy
+fsspec
+huggingface_hub

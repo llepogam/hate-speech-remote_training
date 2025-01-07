@@ -12,11 +12,19 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import io
+
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import precision_score, recall_score, f1_score
+
 
 import spacy
 from spacy.lang.en.stop_words import STOP_WORDS
 
-from tensorflow.keras.layers import Embedding, SimpleRNN, Dense, GRU, LSTM, GlobalMaxPooling1D, Dropout
+from tensorflow.keras.layers import Embedding, SimpleRNN, Dense, GRU, LSTM, GlobalMaxPooling1D, Dropout, Input
 
 from tensorflow.keras.layers import TextVectorization
 
@@ -34,7 +42,7 @@ def read_dataframe():
 def clean_dataframe(df):
     selected_columns = ['tweet', 'subtask_a']
     df_simplified = df[selected_columns]
-    df_simplified['target'] = 0
+    df_simplified.loc[:, 'target'] = 0
     df_simplified.loc[df_simplified['subtask_a'] == 'OFF', 'target'] = 1
     df_simplified = df_simplified.drop(columns=['subtask_a'])
     return df_simplified
@@ -51,17 +59,40 @@ def preprocess_dataframe(df):
 
     return df 
 
+def save_preprocessed_data(df):
+    df.to_csv("preprocessed.csv", index=True)
 
-def build_model(input_shape_length=100,embedding_dim=32,vocab_size=20000):
-        
-    vectorizer = TextVectorization(
-        max_tokens=vocab_size, 
-        output_mode='int',
-        output_sequence_length=input_shape_length
-    )
+
+def get_preprocessed_data():
+
+    # Read the DataFrame from the CSV file
+    df = pd.read_csv("preprocessed.csv")
     
+    # Ensure text data is in string format
+    df["text_clean"] = df["text_clean"].astype(str)
+    
+    # Optionally, ensure target labels are numeric
+    df["target"] = pd.to_numeric(df["target"], errors='coerce')
+
+    return df
+
+
+def tokenize_dataframe(df, max_length=100):
+    tokenizer = tf.keras.preprocessing.text.Tokenizer() # instanciate the tokenizer
+    tokenizer.fit_on_texts(df["text_clean"])
+    df["text_encoded"] = tokenizer.texts_to_sequences(df.text_clean)
+    df["len_review"] = df["text_encoded"].apply(lambda x: len(x))
+    df = df[df["len_review"]!=0]
+
+    text_pad = tf.keras.preprocessing.sequence.pad_sequences(df.text_encoded, padding="post",maxlen=max_length)
+    full_ds = tf.data.Dataset.from_tensor_slices((text_pad, df.target))
+
+    return tokenizer, text_pad, full_ds, df
+
+
+def build_model(tokenizer,input_shape_length=100,embedding_dim=32):
+    vocab_size = len(tokenizer.word_index)
     model = tf.keras.Sequential([
-                    vectorizer,
                     Embedding(vocab_size+1, embedding_dim, input_shape=[input_shape_length,],name="embedding"),
                     GRU(units=64, return_sequences=True), # returns the last output
                     GlobalMaxPooling1D(),
@@ -78,7 +109,10 @@ def build_model(input_shape_length=100,embedding_dim=32,vocab_size=20000):
         loss='binary_crossentropy',  # Loss for binary classification
         metrics=['accuracy']
     )
-    return model, vectorizer
+    return model
+
+
+
 
 
 #------------------ Let's here write the flow of the MLFlow run------------------
@@ -106,13 +140,20 @@ if __name__ == "__main__":
         print("dataframe cleaned...")        
 
         print("preprocessing dataframe...")
-        df_preprocessed = preprocess_dataframe(df_clean)
+        #df_preprocessed = preprocess_dataframe(df_clean)
+        #save_preprocessed_data(df_preprocessed)
+        df_preprocessed = get_preprocessed_data()
         print("dataframe preprocessed...")  
+
 
         input_shape_length = 100
 
+        print("tokenizing dataframe...")
+        tokenizer, text_pad, full_ds, df_tokenized = tokenize_dataframe(df_preprocessed,input_shape_length)
+        print('tokenizing ok...')        
+
         print("splitting the data...")
-        xtrain, xval, ytrain, yval = train_test_split(df_preprocessed["text_clean"], df_preprocessed.target, test_size=0.2)
+        xtrain, xval, ytrain, yval = train_test_split(text_pad,df_tokenized.target, test_size=0.2)
 
         train = tf.data.Dataset.from_tensor_slices((xtrain, ytrain))
         val = tf.data.Dataset.from_tensor_slices((xval, yval))
@@ -122,16 +163,7 @@ if __name__ == "__main__":
 
         embedding_dim = 32
         print("building model...")
-        model,vectorizer = build_model(input_shape_length,embedding_dim)
-
-        # Adapt the vectorizer to the training data
-        print("adapting vectorizer...")
-        vectorizer.adapt(train.map(lambda x, y: x))
-
-        # Log parameters
-        mlflow.log_param("embedding_dim", embedding_dim)
-        mlflow.log_param("input_shape_length", input_shape_length)
-        mlflow.log_param("batch_size", 64)
+        model = build_model(tokenizer,input_shape_length,embedding_dim)
 
 
         print("training model...")
@@ -146,8 +178,31 @@ if __name__ == "__main__":
         input_sample = next(iter(train_batch.take(1)))[0]  # Get a sample batch of input
         predicted_sample = model.predict(input_sample)
         signature = infer_signature(input_sample.numpy(), predicted_sample)
-        mlflow.tensorflow.log_model(model, artifact_path="model", signature=signature)
+        mlflow.tensorflow.log_model(model, artifact_path="hate_speech_detection", signature=signature)
+ 
 
+        y_pred_probs = model.predict(xval)
+        y_pred = (y_pred_probs > 0.5).astype(int) 
+
+        # Compute the confusion matrix
+        cm = confusion_matrix(yval, y_pred)  # y_test is the true labels for X_test
+
+        # Display the confusion matrix
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Not Hate", "Hate"])
+        disp.plot()
+        plt.savefig('confusion_matrix.png') 
+
+        mlflow.log_artifact('confusion_matrix.png')
+
+        accuracy_cm = accuracy_score(yval, y_pred)
+        precision = precision_score(yval, y_pred)
+        recall = recall_score(yval, y_pred)
+        f1 = f1_score(yval, y_pred)
+
+        mlflow.log_param("accuracy_cm", accuracy_cm)
+        mlflow.log_param("precision", precision)
+        mlflow.log_param("recall", recall)
+        mlflow.log_param("f1", f1)
 
 
         print("...Done!")
